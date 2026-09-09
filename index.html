@@ -11,10 +11,10 @@
     --bg: #050a07;
     --bg-raised: #081008;
     --line: #1e4d2b;
-    --line-bright: #2f7a44;
     --green: #4ade80;
     --green-bright: #74f2a3;
     --green-dim: #2f7a44;
+    --green-muted: #3a8f5a; /* text-safe secondary color: ~5:1 contrast on --bg, verified against WCAG AA (4.5:1). --green-faint is ~1.65:1 and is decorative-only (borders/backgrounds) — never use it for text. */
     --green-faint: #1a3d24;
     --red: #ff5c5c;
     --red-dim: #3a1a1a;
@@ -129,11 +129,11 @@
     border-bottom: 1px dashed var(--line);
   }
 
-  label, .field-label{
+  label{
     display:block;
     font-size: 14px;
     letter-spacing: 0.05em;
-    color: var(--green-dim);
+    color: var(--green-muted);
     margin-bottom: 8px;
     text-transform: uppercase;
   }
@@ -183,8 +183,8 @@
   }
   .matrix-grid input:focus{ outline:none; border-color: var(--green); box-shadow: 0 0 0 2px var(--green-faint); }
 
-  .hint{ font-size: 13px; color: var(--green-faint); margin-bottom: 6px; }
-  .hint code{ color: var(--green-dim); }
+  .hint{ font-size: 13px; color: var(--green-muted); margin-bottom: 6px; }
+  .hint code{ color: var(--green); }
 
   .op-card{
     border: 1px solid var(--line);
@@ -197,7 +197,7 @@
     font-size: 16px; color: var(--green-dim); margin-bottom: 18px; letter-spacing: 0.05em;
   }
   .op-card .remove{
-    background:none; border:none; color: var(--green-faint);
+    background:none; border:none; color: var(--green-muted);
     cursor:pointer; font-family: var(--font); font-size: 15px; text-transform: uppercase;
   }
   .op-card .remove:hover{ color: var(--red); }
@@ -292,25 +292,18 @@
     align-items:center;
     justify-content:center;
     text-align:center;
-    color: var(--green-faint);
+    color: var(--green-muted);
     font-size: 16px;
     line-height: 1.7;
     padding: 0 60px;
   }
   .empty-state .prompt{ color: var(--green-dim); }
 
-  .step-desc{
-    font-size: 13.5px;
-    color: var(--green-bright);
-    margin-bottom: 18px;
-  }
-  .step-desc::before{ content: "> "; color: var(--green-dim); }
-
   .trace-block{ margin-bottom: 8px; }
   .trace-label{
     font-size: 14px;
     letter-spacing: 0.08em;
-    color: var(--green-dim);
+    color: var(--green-muted);
     margin-bottom: 14px;
     text-transform: uppercase;
   }
@@ -322,7 +315,7 @@
   }
 
   .trace-arrow{
-    color: var(--green-faint);
+    color: var(--green-muted);
     font-size: 16px;
     padding: 14px 0 14px 4px;
   }
@@ -352,7 +345,6 @@
     color: var(--green-bright);
     border-radius: 2px;
     padding: 6px 10px;
-    box-sizing: border-box;
     overflow-wrap: anywhere;
     word-break: break-word;
     text-align: center;
@@ -367,11 +359,11 @@
   footer{
     margin-top: 40px;
     font-size: 13px;
-    color: var(--green-faint);
+    color: var(--green-muted);
     border-top: 1px solid var(--line);
     padding-top: 18px;
   }
-  footer .k{ color: var(--green-dim); }
+  footer .k{ color: var(--green-muted); }
 </style>
 </head>
 <body>
@@ -412,12 +404,10 @@
         <div class="matrix-scroll">
           <div id="matrixGrid" class="matrix-grid"></div>
         </div>
-        <div class="hint">fractions ok, e.g. <code>3/2</code></div>
       </div>
 
       <div class="panel">
         <div class="section-header"><span>[ OPERATIONS ]</span></div>
-        <div class="hint" style="margin-bottom:12px;">enter a positive value, use the toggle for direction</div>
         <div id="opList"></div>
         <button class="btn dashed" id="addOpBtn" type="button">+ ADD OPERATION</button>
         <div class="error-banner" id="errorBanner"></div>
@@ -460,7 +450,7 @@ const state = {
   operations: [
     { op_type: "replacement", row: 2, row_b: 1, sign: "+", magnitude: "3/2" },
     { op_type: "replacement", row: 3, row_b: 1, sign: "+", magnitude: "1" },
-    { op_type: "scaling", row: 2, row_b: null, operator: "*", magnitude: "2" },
+    { op_type: "scaling", row: 2, row_b: null, factor: "2" },
   ],
 };
 
@@ -504,8 +494,6 @@ function renderMatrixGrid(){
       const input = document.createElement("input");
       input.type = "text";
       input.value = state.entries[r][c];
-      input.dataset.r = r;
-      input.dataset.c = c;
       input.addEventListener("input", (e) => {
         state.entries[r][c] = e.target.value;
       });
@@ -550,22 +538,19 @@ function opFieldsHtml(op, idx){
       </div>
     </div>`;
 
-  const operatorToggle = `
-    <div class="field">
-      <label>Op</label>
-      <div class="toggle-group" data-toggle-op="${idx}" data-toggle-field="operator">
-        <button type="button" class="toggle-btn ${op.operator === "*" ? "active" : ""}" data-value="*">&times;</button>
-        <button type="button" class="toggle-btn ${op.operator === "/" ? "active" : ""}" data-value="/">&divide;</button>
-      </div>
-    </div>`;
-
   const magnitudeField = `
     <div class="field">
       <label>Value</label>
       <input type="text" data-op="${idx}" data-field="magnitude" value="${op.magnitude ?? ""}">
     </div>`;
 
-  if(op.op_type === "scaling") return rowField + operatorToggle + magnitudeField;
+  const factorField = `
+    <div class="field">
+      <label>Factor</label>
+      <input type="text" data-op="${idx}" data-field="factor" value="${op.factor ?? ""}">
+    </div>`;
+
+  if(op.op_type === "scaling") return rowField + factorField;
   if(op.op_type === "interchange") return rowField + rowBField;
   return rowField + rowBField + signToggle + magnitudeField; // replacement
 }
@@ -603,8 +588,7 @@ function renderOps(){
       op.op_type = e.target.value;
       if(op.op_type === "scaling"){
         op.row_b = null;
-        op.operator = op.operator ?? "*";
-        op.magnitude = op.magnitude ?? "1";
+        op.factor = op.factor ?? "1";
       }
       if(op.op_type === "interchange"){
         op.row_b = op.row_b ?? 1;
@@ -656,7 +640,7 @@ function updateAddOpState(){
 
 document.getElementById("addOpBtn").addEventListener("click", () => {
   if(state.operations.length >= MAX_OPS) return;
-  state.operations.push({ op_type: "scaling", row: 1, row_b: null, operator: "*", magnitude: "1" });
+  state.operations.push({ op_type: "scaling", row: 1, row_b: null, factor: "1" });
   renderOps();
 });
 
@@ -670,56 +654,12 @@ function clearError(){
   document.getElementById("errorBanner").classList.remove("show");
 }
 
-// Parses a plain positive magnitude string into an exact {num, den} pair.
-// Accepts three forms: a plain integer ("4"), an a/b fraction ("3/2"), or
-// a decimal ("1.25"). Decimals are converted to an exact fraction (not a
-// float approximation) by scaling out the decimal point and reducing by
-// the GCD, so "1.25" becomes {num:5, den:4}, never a rounded value.
-function gcd(a, b){
-  a = Math.abs(a); b = Math.abs(b);
-  while(b){ [a, b] = [b, a % b]; }
-  return a || 1;
-}
-
-function parseMagnitude(s){
-  const str = (s || "").trim();
-
-  const fracMatch = /^(\d+)\/(\d+)$/.exec(str);
-  if(fracMatch){
-    return { num: parseInt(fracMatch[1], 10), den: parseInt(fracMatch[2], 10) };
-  }
-
-  const decMatch = /^(\d+)\.(\d+)$/.exec(str);
-  if(decMatch){
-    const [, whole, frac] = decMatch;
-    const den = Math.pow(10, frac.length);
-    const num = parseInt(whole, 10) * den + parseInt(frac, 10);
-    const g = gcd(num, den);
-    return { num: num / g, den: den / g };
-  }
-
-  const intMatch = /^(\d+)$/.exec(str);
-  if(intMatch){
-    return { num: parseInt(intMatch[1], 10), den: 1 };
-  }
-
-  return null;
-}
-
-// "3/2" -> "2/3", "4" -> "1/4", "1.25" -> "4/5". Falls back to the raw
-// string if unparsable (the backend will surface a clear error for
-// genuinely bad input).
-function reciprocalString(s){
-  const f = parseMagnitude(s);
-  if(!f || f.num === 0) return s;
-  return f.num === 1 ? `${f.den}` : `${f.den}/${f.num}`;
-}
-
-// Combines the UI's sign/operator toggle with the magnitude field into the
-// single signed factor value the backend's Replacement/Scaling ops expect.
+// Combines the UI's sign toggle (Replacement only) with the magnitude field
+// into the single signed factor value the backend expects. Scaling has no
+// toggle — its factor field is sent through exactly as typed.
 function computeFactor(op){
   if(op.op_type === "scaling"){
-    return op.operator === "/" ? reciprocalString(op.magnitude) : op.magnitude;
+    return op.factor;
   }
   if(op.op_type === "replacement"){
     const mag = (op.magnitude || "").trim();
