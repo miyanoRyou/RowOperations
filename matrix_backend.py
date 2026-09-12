@@ -11,6 +11,118 @@ Core responsibilities:
     3. Apply them in order, recording a full step-by-step trace.
     4. Return the original matrix, each intermediate step, and the final result
        in a JSON-serializable shape.
+
+Optimization notes (see git history / changelog for the "before" version):
+    - Row-parsing errors (e.g. a non-numeric factor) are now caught and
+      normalized into RowOperationError at the point of parsing, instead of
+      leaking a raw ValueError past the public API's exception handling.
+    - limit_denominator(10**6) is now applied only to float input, where it
+      exists to avoid ugly binary-float artifacts (e.g. 0.1 -> a huge
+      denominator). Exact input (int, Fraction, or a "a/b" string) is no
+      longer silently rounded if its denominator happens to exceed 10**6.
+    - Matrix.copy() uses a shallow per-row copy instead of copy.deepcopy.
+      Fraction is immutable, so deepcopy's full object-graph walk buys
+      nothing here and is meaningfully slower.
+    - Each operation's factor is parsed into a Fraction exactly once (cached
+      on the request) and reused by both the math and the notation string,
+      instead of re-parsing the same string twice per step.
+    - RowOperationEngine.run() computes each matrix's display representation
+      exactly once per state. Previously "before" and "after" were computed
+      separately every step, redundantly re-formatting the same state twice
+      at every step boundary.
+    - RowOperationResult.to_dict() builds its dict directly instead of using
+      dataclasses.asdict(). asdict() recursively walks every field via
+      reflection and calls copy.deepcopy() on each leaf value (every matrix
+      cell string) — measured ~330x slower than just building the dict,
+      and this runs on every API response.
+    - NOT done, measured and rejected: caching Matrix._format_fraction (Fraction -> str)
+      with functools.lru_cache. It looked like a natural win (matrices are
+      full of repeated 0s and 1s after reduction) but measured ~4x *slower*
+      than the plain call — lru_cache's hashing/dict-lookup/wrapper overhead
+      costs more than CPython already pays to format a short string. Left
+      as a plain function; documented here so it isn't "re-optimized" later
+      without re-measuring.
+
+Bugs found and fixed in a later code-review pass:
+    - RowOperationRequest was a mutable dataclass with a @cached_property
+      (parsed_factor). Mutating `factor` after that property had already
+      been read once left the cache silently stale — describe() and the
+      actual row arithmetic would keep using the old value. Fixed by
+      freezing the dataclass (cached_property still works on a frozen
+      dataclass; it writes directly to the instance's __dict__, bypassing
+      the frozen __setattr__ guard).
+    - Matrix.__post_init__ only validated shape when generating a default
+      zero matrix — data passed in directly (bypassing from_entries) was
+      never checked against the declared rows/cols, so e.g.
+      Matrix(rows=3, cols=3, data=[[1, 2]]) constructed silently and only
+      misbehaved later, far from the actual mistake. Now validated in
+      __post_init__ itself, so the check applies no matter how a Matrix
+      is constructed.
+    - Factor-parsing-and-error-wrapping logic was duplicated nearly
+      verbatim in both Matrix (_parse_factor) and RowOperationRequest
+      (parsed_factor). Consolidated into one module-level function,
+      _parse_fraction_strict, so there's a single place that decides how
+      "bad factor input" becomes a RowOperationError.
+    - Number (the NumericInput type alias) was renamed: it shadowed the
+      standard library's numbers.Number ABC, a different and broader
+      concept, which was a latent source of confusion for anyone who
+      later imported both.
+
+Loopholes found in an adversarial ("how would I break this") review, and
+fixed — each confirmed with an actual reproduction before fixing:
+    - No dimension cap existed in this library itself — only api.py's
+      Pydantic layer capped rows/cols at 12. Constructing a Matrix directly
+      with e.g. rows=2000, cols=2000 measured 3.5 seconds and a multi-
+      million-object allocation from one constructor call, with nothing in
+      matrix_backend.py to stop it. Since this module's own docs advertise
+      reuse "in a CLI, notebook, or another API framework entirely," a
+      future caller that doesn't happen to replicate api.py's Field(le=12)
+      would have zero protection. Fixed with MAX_MATRIX_DIMENSION, enforced
+      in Matrix.__post_init__ itself (every construction path), independent
+      of whatever wraps it.
+    - No length cap existed on individual numeric strings (a single matrix
+      entry or operation factor). A client could send one absurdly long
+      string in a single JSON field. Confirmed Python 3.11+'s built-in
+      4300-digit integer-conversion limit and the fractions module's regex
+      already prevent the worst outcomes (a 20,000-digit string is
+      rejected in under a millisecond; adversarial near-miss strings don't
+      trigger regex backtracking) — but nothing stopped a much larger
+      string from being accepted and processed before those limits kick
+      in. Fixed with MAX_NUMERIC_STRING_LENGTH, enforced in _to_fraction
+      before Fraction() ever sees the value.
+    - RowOperationResult.to_dict() returned its internal list objects by
+      reference, not copies. Confirmed that mutating the returned dict
+      (`to_dict()["final_matrix"][0][0] = "x"`) silently corrupted the
+      source RowOperationResult's own state, so a second call to to_dict()
+      returned the tampered value. Not exploitable through the current
+      stateless per-request API usage, but a real encapsulation break for
+      any future reuse (caching a result, serving it to multiple
+      consumers, logging pipelines). Fixed by returning fresh row copies —
+      cheap, since row length is bounded by MAX_MATRIX_DIMENSION.
+
+Found by deliberately fuzzing the input (trying to make it crash) and
+confirming each one live before fixing:
+    - A matrix entry or factor of Infinity or -Infinity (e.g. the JSON
+      number 1e400, which overflows to Infinity) made Python's Fraction()
+      raise OverflowError — a type that wasn't in the except list, so it
+      escaped as a raw, unhandled error. Confirmed this crashed the live
+      API with a 500. Fixed by adding OverflowError next to ValueError/
+      ZeroDivisionError/TypeError everywhere a factor or entry gets
+      parsed. NaN, for comparison, already raised ValueError and was
+      already handled correctly — it was specifically Infinity that slipped
+      through.
+    - Constructing a Matrix directly with a non-integer rows or cols (a
+      string, None, or a float) crashed with an unhandled TypeError the
+      moment __post_init__ tried to compare it to a number. The live API
+      was never at risk here (Pydantic already rejects a non-integer
+      "rows" with a clean 422 before this code ever runs), but direct
+      library use had no such protection. Fixed by checking the type
+      explicitly in __post_init__ and raising a normal DimensionError.
+      (Matrix.from_entries() turned out to already be safe on this one:
+      its very first check, comparing len(entries) to rows, naturally
+      raises a clean error for a mismatched type without ever reaching a
+      comparison that would crash — confirmed by testing it directly,
+      not assumed.)
 """
 
 from __future__ import annotations
@@ -55,12 +167,12 @@ MAX_NUMERIC_STRING_LENGTH = 64
 
 class RowOperationType(str, Enum):
     """
-    The three elementary row operations a client may request.
+    The three operations you're allowed to do to a matrix: Scaling,
+    Interchange, and Replacement.
 
-    Inherits from both str and Enum so that a plain JSON string like
-    "scaling" compares equal to and validates against RowOperationType.SCALING
-    — this is what lets FastAPI/Pydantic accept raw strings over the wire
-    and match them straight to these members with no extra glue code.
+    This is also a string, so a plain JSON value like "scaling" is
+    automatically recognized as RowOperationType.SCALING — no extra
+    conversion code needed when data comes in from the API.
     """
     SCALING = "scaling"
     INTERCHANGE = "interchange"
@@ -68,35 +180,31 @@ class RowOperationType(str, Enum):
 
 
 class MatrixError(Exception):
-    """Base exception for all matrix-related errors."""
+    """Parent class for every error this file can raise."""
 
 
 class DimensionError(MatrixError):
-    """Raised when matrix dimensions are invalid or inconsistent with entries."""
+    """The matrix's size is wrong — too big, or the shape doesn't match the data given."""
 
 
 class RowOperationError(MatrixError):
-    """Raised when a requested row operation is invalid (bad index, bad factor, etc.)."""
+    """A requested operation can't be done — bad row number, bad factor, etc."""
 
 
 def _to_fraction(raw_value: NumericInput) -> Fraction:
     """
-    Convert a raw client value into an exact Fraction.
+    Turn a number, decimal, or fraction string into an exact Fraction.
 
-    limit_denominator is applied *only* to float input, where it exists to
-    collapse binary-float artifacts (e.g. 0.1 -> Fraction(3602879701896397,
-    36028797018963968)) into the nearest "nice" fraction a human plausibly
-    meant. int, Fraction, and "a/b" string input are already exact and are
-    left untouched, so a legitimately large denominator the user typed on
-    purpose is never silently rounded away.
+    Examples that all work: 5, "5", 0.5, "0.5", "3/2", "-3/2".
 
-    String input longer than MAX_NUMERIC_STRING_LENGTH is rejected up
-    front, before Fraction() ever sees it — see that constant's docstring
-    for why.
+    Floats get special handling: a computer float like 0.1 isn't stored
+    exactly, so converting it straight to a Fraction gives an ugly result
+    like 3602879701896397/36028797018963968. limit_denominator cleans
+    that up into the simple 1/10 a person actually meant. Numbers typed
+    as text ("3/2") don't have this problem, so they're left exact.
 
-    Raises whatever Fraction() itself raises (ValueError, ZeroDivisionError,
-    TypeError) on unparseable input — callers are expected to catch and
-    wrap these into a RowOperationError via _parse_fraction_strict below.
+    Also rejects any string that's unreasonably long, before it's even
+    parsed — see MAX_NUMERIC_STRING_LENGTH above for why.
     """
     if isinstance(raw_value, str) and len(raw_value) > MAX_NUMERIC_STRING_LENGTH:
         raise ValueError(
@@ -110,18 +218,16 @@ def _to_fraction(raw_value: NumericInput) -> Fraction:
 
 def _parse_fraction_strict(raw_value: NumericInput) -> Fraction:
     """
-    Parse a raw client value into a Fraction, normalizing any failure into
-    this library's own RowOperationError.
+    Same as _to_fraction, but turns any parsing failure into a
+    RowOperationError instead of Python's built-in error types.
 
-    This is the single place that turns "bad input" into "the right
-    exception type." It used to be duplicated (once in Matrix, once in
-    RowOperationRequest) with the same try/except in both places — that
-    duplication is exactly how a future edit to one copy and not the other
-    would have silently reintroduced the raw-ValueError-leak bug.
+    Everything that needs to parse a factor calls this one function, so
+    there's only one place that decides what a "bad number" error looks
+    like — instead of that logic being copy-pasted in multiple spots.
     """
     try:
         return _to_fraction(raw_value)
-    except (ValueError, ZeroDivisionError, TypeError) as e:
+    except (ValueError, ZeroDivisionError, TypeError, OverflowError) as e:
         raise RowOperationError(f"Invalid factor: {raw_value!r}") from e
 
 
@@ -132,18 +238,14 @@ def _parse_fraction_strict(raw_value: NumericInput) -> Fraction:
 @dataclass(slots=True)
 class Matrix:
     """
-    A rectangular grid of exact Fraction values.
-
-    This is the plain-data core the rest of the module operates on: it knows
-    how to validate its own shape and mutate its rows, but nothing about
-    HTTP, JSON, or the notion of a "request" — that lives in
-    RowOperationRequest / RowOperationEngine instead.
+    A grid of numbers, stored as exact fractions so nothing ever rounds
+    or loses precision.
 
     Attributes:
-        rows: Number of rows. Must be a positive integer.
-        cols: Number of columns. Must be a positive integer.
-        data: The actual values, as rows of exact Fractions. If omitted,
-            a rows x cols matrix of zeros is created automatically.
+        rows: How many rows the matrix has. Must be 1 or more.
+        cols: How many columns the matrix has. Must be 1 or more.
+        data: The actual numbers, row by row. If you don't provide this,
+            you get a matrix full of zeros of the size you asked for.
     """
     rows: int
     cols: int
@@ -151,17 +253,20 @@ class Matrix:
 
     def __post_init__(self):
         """
-        Validate dimensions and, if data was supplied directly (bypassing
-        from_entries), validate that its shape actually matches rows/cols.
+        Runs automatically right after a Matrix is created, to check
+        everything makes sense: the size is valid, and — if actual data
+        was given — that it really is `rows` rows of `cols` numbers each.
 
-        Without this check, `Matrix(rows=3, cols=3, data=[[1, 2]])` would
-        silently construct an object that *claims* to be 3x3 but only
-        holds one row of two values — every downstream method (display,
-        row operations, __str__) would then either misbehave or crash far
-        from the actual mistake. from_entries() already validates shape
-        for its own callers; this check closes the same gap for anyone
-        constructing a Matrix directly.
+        Without this check, you could accidentally create a Matrix that
+        claims to be 3x3 but only actually holds one row, and it would
+        break later in a confusing way instead of right here where the
+        mistake was made.
         """
+        if not isinstance(self.rows, int) or not isinstance(self.cols, int):
+            raise DimensionError(
+                f"Matrix rows and cols must be integers "
+                f"(got rows={self.rows!r}, cols={self.cols!r})."
+            )
         if self.rows <= 0 or self.cols <= 0:
             raise DimensionError("Matrix dimensions must be positive integers.")
         if self.rows > MAX_MATRIX_DIMENSION or self.cols > MAX_MATRIX_DIMENSION:
@@ -185,30 +290,29 @@ class Matrix:
                 )
 
     @classmethod
-    def from_entries(cls, rows: int, cols: int, entries: List[List[NumericInput]]) -> "Matrix":
+    def from_entries(cls, rows: int, cols: int, entries: List[List[NumericInput]]) -> Matrix:
         """
-        Build a Matrix from raw client input, converting every entry to an
-        exact Fraction and validating shape along the way.
+        Build a Matrix from raw values (like what comes in from a web request),
+        turning every entry into an exact fraction and checking the shape
+        along the way.
 
         Args:
-            rows: Expected number of rows; must match len(entries).
-            cols: Expected number of columns; must match the length of
+            rows: How many rows you expect. Must match len(entries).
+            cols: How many columns you expect. Must match the length of
                 every row in entries.
-            entries: The raw values as given by the client — ints, floats,
-                "a/b" fraction strings, decimal strings, or Fraction
-                objects are all accepted (see NumericInput).
+            entries: The actual numbers — can be plain numbers, decimal
+                strings, or fraction strings like "3/2" (see NumericInput).
 
         Raises:
-            DimensionError: if the shape doesn't match, or if any entry
-                can't be converted to a number.
+            DimensionError: if the shape doesn't match, or any entry
+                isn't a valid number.
         """
         if len(entries) != rows:
             raise DimensionError(f"Expected {rows} rows, got {len(entries)}.")
 
-        # Checked here too (not just in __post_init__): rejecting an
-        # oversized request before touching any of its cells means a
-        # client can't force this loop to do real work just by asking for
-        # a huge matrix — the cost of saying "no" stays O(1) either way.
+        # Check the size limit before doing any real work, so a request for
+        # an enormous matrix gets rejected instantly instead of making the
+        # server churn through it first.
         if rows > MAX_MATRIX_DIMENSION or cols > MAX_MATRIX_DIMENSION:
             raise DimensionError(
                 f"Matrix dimensions cannot exceed {MAX_MATRIX_DIMENSION} "
@@ -225,7 +329,7 @@ class Matrix:
             for j, raw_value in enumerate(row):
                 try:
                     converted_row.append(_to_fraction(raw_value))
-                except (ValueError, ZeroDivisionError, TypeError) as e:
+                except (ValueError, ZeroDivisionError, TypeError, OverflowError) as e:
                     raise DimensionError(
                         f"Invalid numeric entry at row {i + 1}, col {j + 1}: {raw_value!r}"
                     ) from e
@@ -233,23 +337,19 @@ class Matrix:
 
         return cls(rows=rows, cols=cols, data=converted)
 
-    def copy(self) -> "Matrix":
+    def copy(self) -> Matrix:
         """
-        Return an independent copy that can be mutated without affecting
-        this instance.
+        Make an independent copy you can change without affecting this one.
 
-        Uses a shallow per-row copy rather than copy.deepcopy: Fraction is
-        immutable, so nothing below the row-list level ever needs its own
-        copy — deepcopy's full object-graph walk would just be paying for
-        safety this data doesn't need. Row operations always assign a
-        *new* list to a row (see scale_row/replace_row below) rather than
-        mutating an existing row's contents in place, which is what makes
-        this shallow copy safe.
+        This only needs to copy each row's list, not every number inside
+        it — numbers here never change in place, a row operation always
+        builds a brand new row instead of editing the old one. So a full,
+        slower deep copy isn't necessary.
         """
         return Matrix(rows=self.rows, cols=self.cols, data=[row[:] for row in self.data])
 
     def _check_row_index(self, row_idx: int) -> None:
-        """Raise RowOperationError if row_idx (0-indexed) is out of bounds."""
+        """Raise an error if row_idx (counting from 0) doesn't exist in this matrix."""
         if not (0 <= row_idx < self.rows):
             raise RowOperationError(
                 f"Row index {row_idx + 1} is out of bounds. Matrix has {self.rows} rows."
@@ -257,48 +357,38 @@ class Matrix:
 
     @staticmethod
     def _format_fraction(value: Fraction) -> str:
-        """Render a Fraction the way a human would write it: '3' or '1/2', never '3/1'."""
+        """Turn a Fraction into text the way a person would write it: '3' or '1/2', never '3/1'."""
         if value.denominator == 1:
             return str(value.numerator)
         return f"{value.numerator}/{value.denominator}"
 
     def to_display_rows(self) -> List[List[str]]:
-        """Return a JSON/human-friendly snapshot: every Fraction rendered as a string."""
+        """Return this matrix as plain text, ready to show on screen or send as JSON."""
         return [[self._format_fraction(v) for v in row] for row in self.data]
 
-    def __str__(self) -> str:
-        """Render the matrix as an aligned ASCII grid, e.g. for CLI/debug output."""
-        display = self.to_display_rows()
-        widths = [max(len(display[r][c]) for r in range(self.rows)) for c in range(self.cols)]
-        lines = []
-        for row in display:
-            padded = [val.rjust(widths[c]) for c, val in enumerate(row)]
-            lines.append("[ " + "  ".join(padded) + " ]")
-        return "\n".join(lines)
-
-    # ---- Elementary Row Operations (mutate in place) ----
+    # ---- The three elementary row operations (these change the matrix) ----
     #
-    # NOTE ON INDEXING: every method below takes 0-indexed row positions
-    # (standard Python indexing: row 0 is the first row), NOT the 1-indexed
-    # "Row 1, Row 2, ..." convention used at the RowOperationRequest/API
-    # layer. RowOperationEngine._apply() is what converts between the two;
-    # if you're calling these methods directly (e.g. from a notebook or
-    # another framework), remember to subtract 1 from a human-facing row
-    # number yourself.
+    # A NOTE ON ROW NUMBERS: the methods below count rows starting from 0
+    # (row 0 is the first row) — normal Python counting. Elsewhere in this
+    # file (RowOperationRequest, the API), rows are counted from 1 instead
+    # ("Row 1", "Row 2", ...), which is more natural for a human typing
+    # into a form. RowOperationEngine._apply() converts between the two.
+    # If you're calling scale_row/interchange_rows/replace_row yourself,
+    # remember to subtract 1 from a row number a person gave you.
 
     def scale_row(self, row: int, factor: NumericInput) -> None:
         """
-        Scaling: R_row -> factor * R_row.
+        Multiply every number in a row by factor.
 
         Args:
-            row: 0-indexed row to scale.
-            factor: Nonzero multiplier. Any NumericInput is accepted and
-                parsed to an exact Fraction.
+            row: Which row to scale (counting from 0).
+            factor: What to multiply by. Can't be zero — multiplying a
+                row by zero would erase real information, and that's why
+                textbooks don't allow it as an elementary row operation.
 
         Raises:
-            RowOperationError: if row is out of bounds, factor can't be
-                parsed, or factor is zero (scaling by zero would destroy
-                information and isn't a valid elementary row operation).
+            RowOperationError: if the row doesn't exist, factor isn't a
+                valid number, or factor is zero.
         """
         self._check_row_index(row)
         parsed_factor = _parse_fraction_strict(factor)
@@ -308,17 +398,16 @@ class Matrix:
 
     def interchange_rows(self, row_a: int, row_b: int) -> None:
         """
-        Interchange: R_row_a <-> R_row_b.
+        Swap two rows with each other.
 
         Args:
-            row_a: 0-indexed first row.
-            row_b: 0-indexed second row. Must differ from row_a.
+            row_a: The first row (counting from 0).
+            row_b: The second row. Must be different from row_a.
 
         Raises:
-            RowOperationError: if either index is out of bounds, or if
-                row_a and row_b are the same row (a no-op that almost
-                certainly indicates a mistake upstream, so it's rejected
-                rather than silently accepted).
+            RowOperationError: if either row doesn't exist, or if
+                row_a and row_b are the same row (swapping a row with
+                itself isn't a real swap, so it's rejected).
         """
         self._check_row_index(row_a)
         self._check_row_index(row_b)
@@ -328,24 +417,24 @@ class Matrix:
 
     def replace_row(self, target_row: int, source_row: int, factor: NumericInput) -> None:
         """
-        Replacement: R_target -> R_target + factor * R_source.
+        Add a multiple of one row onto another row.
 
-        This is the only one of the three elementary operations that
-        actually combines two rows, and it's the one that does the real
-        work of eliminating variables during row reduction.
+        This is the operation that actually eliminates variables when
+        solving a system of equations — the other two just rearrange or
+        rescale rows.
 
         Args:
-            target_row: 0-indexed row being replaced.
-            source_row: 0-indexed row being added in (scaled by factor).
-                Must differ from target_row.
-            factor: Multiplier applied to source_row before adding. May be
-                any NumericInput, including negative values (a negative
-                factor is what makes this "subtraction" — see
-                RowOperationRequest.describe for the notation).
+            target_row: The row that gets changed (counting from 0).
+            source_row: The row being added in, after being multiplied
+                by factor. Must be different from target_row.
+            factor: What to multiply source_row by before adding it.
+                Can be negative — that's how you "subtract" one row
+                from another (see RowOperationRequest.describe below).
 
         Raises:
-            RowOperationError: if either index is out of bounds, if
-                target_row equals source_row, or if factor can't be parsed.
+            RowOperationError: if either row doesn't exist, if
+                target_row and source_row are the same, or if factor
+                isn't a valid number.
         """
         self._check_row_index(target_row)
         self._check_row_index(source_row)
@@ -364,22 +453,21 @@ class Matrix:
 @dataclass(frozen=True)
 class RowOperationRequest:
     """
-    A single row-operation instruction, as a client (UI/API) would submit it.
-    Rows are 1-indexed for user-friendliness (Row 1, Row 2, ...).
+    One operation to perform, exactly as a user would fill it in on a form.
+    Rows are counted from 1 here ("Row 1", "Row 2", ...) since that's more
+    natural for a person than starting at 0.
 
-    Field usage by op_type:
-        SCALING:      row, factor
-        INTERCHANGE:  row, row_b
-        REPLACEMENT:  row (target), row_b (source), factor
+    Which fields you need depends on the operation:
+        Scaling:      row, factor
+        Interchange:  row, row_b
+        Replacement:  row (the one being changed), row_b (the one being
+                      added in), factor
 
-    Frozen deliberately: parsed_factor below is a @cached_property, and a
-    cached_property on a *mutable* object is a correctness trap — mutate
-    `factor` after the cache has been populated once, and every subsequent
-    read silently keeps returning the stale, pre-mutation value. Freezing
-    makes that mistake impossible instead of relying on callers to just not
-    make it. (cached_property still works here: it writes straight into
-    the instance's __dict__, which bypasses the frozen dataclass's
-    __setattr__ guard — this is safe, standard behavior, not a workaround.)
+    This can't be changed after it's created (that's what "frozen" means).
+    That's on purpose: parsed_factor below remembers its answer the first
+    time it's asked, so if `factor` could be changed afterward, that
+    remembered answer would quietly go stale and give a wrong result.
+    Making the whole object unchangeable rules that out completely.
     """
     op_type: RowOperationType
     row: int
@@ -389,11 +477,10 @@ class RowOperationRequest:
     @cached_property
     def parsed_factor(self) -> Fraction:
         """
-        The factor parsed into a Fraction exactly once, then reused by both
-        the actual row arithmetic (via the engine) and the notation string
-        in describe(). Previously the same factor string was parsed twice
-        per operation (once for math, once for display). Defaults to 1
-        when no factor was given (Interchange doesn't use one).
+        The factor as an exact Fraction, figured out once and remembered
+        after that — both the actual math and the on-screen notation use
+        this same value, instead of each converting the factor separately.
+        If no factor was given (Interchange doesn't use one), this is 1.
         """
         if self.factor is None:
             return Fraction(1)
@@ -401,10 +488,12 @@ class RowOperationRequest:
 
     def describe(self) -> str:
         """
-        Render this operation in compact math notation for the step trace,
-        e.g. '3/2R1 -> R1' (scaling) or 'R2 + (-1/2R1) -> R2' (replacement,
-        negative coefficient parenthesized). Interchange renders as a plain
-        swap: 'R1 <-> R2'.
+        Write this operation out in plain math notation, the way it
+        appears in the step-by-step trace. For example:
+          Scaling:      '3/2R1 -> R1'
+          Replacement:  'R2 + (-1/2R1) -> R2'  (a negative factor gets
+                        wrapped in parentheses)
+          Interchange:  'R1 <-> R2'
         """
         r = self.row
         if self.op_type == RowOperationType.SCALING:
@@ -419,7 +508,7 @@ class RowOperationRequest:
         return "Unknown operation"
 
     def _format_factor(self) -> str:
-        """Render parsed_factor the way a human would write it: '3' or '1/2', never '3/1'."""
+        """Turn parsed_factor into text the way a person would write it: '3' or '1/2', never '3/1'."""
         f = self.parsed_factor
         return str(f.numerator) if f.denominator == 1 else f"{f.numerator}/{f.denominator}"
 
@@ -427,9 +516,9 @@ class RowOperationRequest:
 @dataclass(slots=True)
 class OperationStep:
     """
-    A record of one applied operation: what it was, and the matrix state
-    immediately before and after it ran. This is the unit the frontend's
-    step-by-step trace is built from — one of these per operation, in order.
+    A record of one operation after it's been applied: what it was, and
+    what the matrix looked like right before and right after. The
+    step-by-step trace shown on screen is just a list of these, in order.
     """
     step_number: int
     description: str
@@ -440,10 +529,10 @@ class OperationStep:
 @dataclass(slots=True)
 class RowOperationResult:
     """
-    The full outcome of running a sequence of row operations: the starting
-    matrix, the final matrix, and every intermediate step in between. This
-    is the top-level object RowOperationEngine.run() returns, and to_dict()
-    is what api.py serializes straight into the HTTP response body.
+    Everything about a finished run: the matrix you started with, the
+    matrix you ended with, and every step in between. This is what
+    RowOperationEngine.run() hands back, and to_dict() turns it into the
+    JSON that actually gets sent to the browser.
     """
     original_matrix: List[List[str]]
     final_matrix: List[List[str]]
@@ -451,22 +540,17 @@ class RowOperationResult:
 
     def to_dict(self) -> dict:
         """
-        Convert to a plain JSON-serializable dict.
+        Turn this into a plain dictionary, ready to convert to JSON.
 
-        Deliberately hand-written rather than dataclasses.asdict(): asdict()
-        recursively walks every field via reflection and calls
-        copy.deepcopy() on each leaf value (i.e. every matrix cell string,
-        one at a time). That generality is unneeded for this fixed, shallow
-        shape, and building the dict directly measured ~330x faster —
-        which matters since this runs on every API response.
+        Builds the dictionary by hand instead of using Python's generic
+        dataclasses.asdict() helper, which is much slower for something
+        this simple — and since this runs on every single API response,
+        that speed difference actually matters.
 
-        Returns fresh row lists (not the same list objects this result
-        holds internally): matrix rows are small (capped by
-        MAX_MATRIX_DIMENSION), so the copy is cheap, and it closes off a
-        real aliasing hole — without it, a caller doing
-        `to_dict()['final_matrix'][0][0] = "x"` would silently mutate this
-        object's own state, corrupting the value any *other* caller (or a
-        second call to to_dict()) would see afterward.
+        Also makes fresh copies of each row of numbers, rather than
+        handing out the same lists this object uses internally. That way,
+        if whoever receives this dictionary edits it, it can't accidentally
+        change this object's own data too.
         """
         return {
             "original_matrix": [row[:] for row in self.original_matrix],
@@ -483,7 +567,7 @@ class RowOperationResult:
         }
 
     def to_json(self, indent: int = 2) -> str:
-        """Convenience wrapper: to_dict() serialized to a JSON string (e.g. for CLI output)."""
+        """Same as to_dict(), but as a JSON-formatted string — handy for printing to a console."""
         return json.dumps(self.to_dict(), indent=indent)
 
 
@@ -493,41 +577,40 @@ class RowOperationResult:
 
 class RowOperationEngine:
     """
-    Applies a bounded sequence (<= MAX_OPERATIONS) of elementary row operations
-    to a matrix and records a full step-by-step trace.
+    Takes a matrix and a list of operations, and runs them one by one,
+    keeping a record of every step along the way.
 
-    The cap is enforced here (not just in the UI) so it can't be bypassed by
-    a client sending a longer list directly to the backend.
+    Also enforces the MAX_OPERATIONS limit itself (not just in the app's
+    UI), so there's no way to sneak past it by talking to the backend
+    directly instead of going through the on-screen form.
     """
 
     def __init__(self, matrix: Matrix):
         """
-        Snapshot the given matrix so later mutation of the caller's own
-        Matrix object (outside this engine) can't retroactively change
-        what "the original matrix" was for a run already in progress.
+        Take a snapshot of the matrix you give it, so if you go and change
+        your own copy of that matrix afterward, it won't mess with a run
+        that's already using it.
         """
         self.original_matrix = matrix.copy()
 
     def run(self, operations: List[RowOperationRequest]) -> RowOperationResult:
         """
-        Apply a sequence of row operations in order and return the full trace.
+        Apply each operation in order and return the full result.
 
         Args:
-            operations: 1 to MAX_OPERATIONS RowOperationRequest instances,
-                applied in the given order.
+            operations: A list of 1 to MAX_OPERATIONS operations, applied
+                in the order given.
 
         Returns:
-            A RowOperationResult holding the untouched original matrix,
-            one OperationStep per operation (with before/after snapshots
-            and human-readable notation), and the final matrix.
+            A RowOperationResult with the starting matrix, one step per
+            operation (before/after snapshots plus the notation for what
+            happened), and the final matrix.
 
         Raises:
-            RowOperationError: if the operation list is empty, exceeds
-                MAX_OPERATIONS, or any individual operation is invalid
-                (bad row index, bad factor, etc.) — raised as soon as the
-                first invalid operation is reached, leaving this engine's
-                own state untouched (a fresh working copy is discarded on
-                error; self.original_matrix is never mutated).
+            RowOperationError: if the list is empty, has too many
+                operations, or any operation is invalid (bad row number,
+                bad factor, etc). If this happens, nothing is left changed
+                — the matrix you started with is never touched.
         """
         if not operations:
             raise RowOperationError("At least one row operation must be provided.")
@@ -540,10 +623,9 @@ class RowOperationEngine:
         working = self.original_matrix.copy()
         steps: List[OperationStep] = []
 
-        # Each matrix state is formatted exactly once. Previously "before"
-        # and "after" were each recomputed via to_display_rows() every step,
-        # redundantly re-formatting the *same* state twice at every step
-        # boundary (step i's "after" is byte-for-byte step i+1's "before").
+        # Keep track of what the matrix currently looks like as text, so
+        # each step only has to convert it once — the "after" of one step
+        # is exactly the "before" of the next, no need to redo that work.
         current_display = self.original_matrix.to_display_rows()
 
         for i, op in enumerate(operations, start=1):
@@ -568,10 +650,9 @@ class RowOperationEngine:
     @staticmethod
     def _apply(matrix: Matrix, op: RowOperationRequest) -> None:
         """
-        Dispatch one RowOperationRequest to the matching Matrix method,
-        converting the request's 1-indexed rows (Row 1, Row 2, ...) to the
-        0-indexed positions Matrix's methods expect, and checking that each
-        op_type actually has the fields it needs before calling into it.
+        Run one operation on the matrix: figure out which Matrix method to
+        call, switch its row numbers from "starting at 1" to "starting at
+        0", and make sure it actually has the fields it needs first.
         """
         row_idx = op.row - 1
         row_b_idx = op.row_b - 1 if op.row_b is not None else None
@@ -600,7 +681,7 @@ class RowOperationEngine:
 # ---------------------------------------------------------------------------
 
 def print_matrix(display_rows: List[List[str]], label: str = "") -> None:
-    """Print a matrix (already in to_display_rows() form) as an aligned ASCII grid."""
+    """Print a matrix to the console, lined up neatly in a grid."""
     if label:
         print(label)
     widths = [
@@ -614,7 +695,7 @@ def print_matrix(display_rows: List[List[str]], label: str = "") -> None:
 
 
 def print_result(result: RowOperationResult) -> None:
-    """Print a full RowOperationResult to the console: original -> each step -> final."""
+    """Print a whole result to the console: the starting matrix, each step, then the final matrix."""
     print_matrix(result.original_matrix, "Original Matrix:")
     for step in result.steps:
         print(f"Step {step.step_number}: {step.description}")
