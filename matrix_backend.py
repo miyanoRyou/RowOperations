@@ -123,6 +123,7 @@ confirming each one live before fixing:
       raises a clean error for a mismatched type without ever reaching a
       comparison that would crash — confirmed by testing it directly,
       not assumed.)
+
 """
 
 from __future__ import annotations
