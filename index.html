@@ -300,6 +300,39 @@
   .empty-state .prompt{ color: var(--green-dim); }
 
   .trace-block{ margin-bottom: 8px; }
+
+  .matrix-and-computation{
+    display:flex;
+    gap: 28px;
+    align-items:flex-start;
+    flex-wrap: wrap;
+  }
+
+  .computation-panel{
+    border: 1px solid var(--line);
+    background: var(--bg);
+    padding: 16px 20px;
+    min-width: 260px;
+  }
+  .computation-title{
+    font-size: 14px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    margin-bottom: 12px;
+    color: var(--green-muted);
+  }
+  .computation-line{
+    font-size: 15px;
+    color: var(--green-bright);
+    margin-bottom: 6px;
+    white-space: nowrap;
+  }
+  .computation-note{
+    font-size: 13px;
+    color: var(--green-muted);
+    line-height: 1.5;
+    max-width: 260px;
+  }
   .trace-label{
     font-size: 14px;
     letter-spacing: 0.08em;
@@ -694,7 +727,7 @@ async function runOperations(){
       showError(data.detail ?? "The backend rejected this request.");
       return;
     }
-    renderResults(data);
+    renderResults(data, payload.operations);
   }catch(e){
     showError("Could not reach the backend at " + API_BASE + ". Is uvicorn running?");
   }
@@ -726,11 +759,81 @@ function renderMatrixDisplay(matrix, changedRows){
   return el;
 }
 
-function renderResults(data){
+// Splits a factor string like "-3/2" into its sign and magnitude, so the
+// computation line can read naturally ("5 - 3/2×2") instead of awkwardly
+// ("5 + -3/2×2").
+function splitSign(factorStr){
+  const s = (factorStr || "").trim();
+  if(s.startsWith("-")) return { sign: "-", abs: s.slice(1) };
+  return { sign: "+", abs: s };
+}
+
+// Builds the panel shown beside a step's matrix: the actual arithmetic
+// that turned each affected cell's "before" value into its "after" value.
+// Returns null if there's no op (the Original/Final blocks aren't tied
+// to a single operation, so nothing is shown there).
+function renderComputationPanel(op, matrixBefore, matrixAfter){
+  if(!op) return null;
+
+  const panel = document.createElement("div");
+  panel.className = "computation-panel";
+
+  const title = document.createElement("div");
+  title.className = "computation-title";
+  title.textContent = "COMPUTATION";
+  panel.appendChild(title);
+
+  if(op.op_type === "interchange"){
+    const note = document.createElement("div");
+    note.className = "computation-note";
+    note.textContent = `R${op.row} and R${op.row_b} swap positions directly \u2014 no arithmetic involved.`;
+    panel.appendChild(note);
+    return panel;
+  }
+
+  const targetIdx = op.row - 1;
+  const cols = matrixBefore[targetIdx].length;
+
+  if(op.op_type === "scaling"){
+    const { sign, abs } = splitSign(op.factor);
+    const coef = sign === "-" ? `-${abs}` : abs;
+    for(let j = 0; j < cols; j++){
+      const line = document.createElement("div");
+      line.className = "computation-line";
+      line.textContent = `${coef} \u00d7 ${matrixBefore[targetIdx][j]} = ${matrixAfter[targetIdx][j]}`;
+      panel.appendChild(line);
+    }
+  } else if(op.op_type === "replacement"){
+    const sourceIdx = op.row_b - 1;
+    const { sign, abs } = splitSign(op.factor);
+    for(let j = 0; j < cols; j++){
+      const line = document.createElement("div");
+      line.className = "computation-line";
+      line.textContent =
+        `${matrixBefore[targetIdx][j]} ${sign} ${abs}\u00d7${matrixBefore[sourceIdx][j]} = ${matrixAfter[targetIdx][j]}`;
+      panel.appendChild(line);
+    }
+  }
+
+  return panel;
+}
+
+// Wraps a matrix display and its computation panel side by side. If
+// there's no op (Original/Final blocks), just the matrix is returned.
+function renderMatrixWithComputation(matrix, changedRows, op, matrixBefore, matrixAfter){
+  const wrap = document.createElement("div");
+  wrap.className = "matrix-and-computation";
+  wrap.appendChild(renderMatrixDisplay(matrix, changedRows));
+  const panel = renderComputationPanel(op, matrixBefore, matrixAfter);
+  if(panel) wrap.appendChild(panel);
+  return wrap;
+}
+
+function renderResults(data, operations){
   const stepView = document.getElementById("stepView");
   stepView.innerHTML = "";
 
-  // 1. Original matrix
+  // 1. Original matrix — no operation applied yet, so no computation panel.
   const originalBlock = document.createElement("div");
   originalBlock.className = "trace-block";
   const originalLabel = document.createElement("div");
@@ -741,6 +844,7 @@ function renderResults(data){
   stepView.appendChild(originalBlock);
 
   // 2. Each operation, in order, with the row(s) it changed highlighted
+  //    and the actual per-cell arithmetic shown beside the matrix.
   data.steps.forEach((step, i) => {
     const arrow = document.createElement("div");
     arrow.className = "trace-arrow";
@@ -761,11 +865,13 @@ function renderResults(data){
     block.appendChild(opLine);
 
     const changed = diffRows(step.matrix_before, step.matrix_after);
-    block.appendChild(renderMatrixDisplay(step.matrix_after, changed));
+    const op = operations ? operations[i] : null;
+    block.appendChild(renderMatrixWithComputation(step.matrix_after, changed, op, step.matrix_before, step.matrix_after));
     stepView.appendChild(block);
   });
 
-  // 3. Final matrix, visually emphasized
+  // 3. Final matrix, visually emphasized. Its computation was already
+  //    shown in the last STEP block above, so no panel is repeated here.
   const finalArrow = document.createElement("div");
   finalArrow.className = "trace-arrow";
   finalArrow.textContent = "|";
