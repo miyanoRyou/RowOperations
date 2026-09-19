@@ -144,6 +144,7 @@
     display:flex;
     border: 1px solid var(--line);
     width: 140px;
+    height: 52px;
   }
   .stepper button{
     background: var(--bg);
@@ -251,6 +252,14 @@
   .btn:hover{ border-color: var(--green); color: var(--green-bright); }
   .btn:disabled{ opacity: 0.3; cursor: not-allowed; }
   .btn.dashed{ border-style: dashed; margin-bottom: 22px; }
+
+  .reset-btn{
+    width: 140px;
+    height: 52px;
+    padding: 0;
+    font-size: 13px;
+  }
+  .reset-btn:hover{ border-color: var(--red); color: var(--red); }
 
   .run-btn{
     width:100%;
@@ -419,7 +428,7 @@
             <label>Rows</label>
             <div class="stepper">
               <button type="button" data-dim="rows" data-dir="-1">-</button>
-              <input id="rowsInput" type="text" value="3" readonly>
+              <input id="rowsInput" type="text" value="3" inputmode="numeric">
               <button type="button" data-dim="rows" data-dir="1">+</button>
             </div>
           </div>
@@ -427,9 +436,13 @@
             <label>Cols</label>
             <div class="stepper">
               <button type="button" data-dim="cols" data-dir="-1">-</button>
-              <input id="colsInput" type="text" value="4" readonly>
+              <input id="colsInput" type="text" value="4" inputmode="numeric">
               <button type="button" data-dim="cols" data-dir="1">+</button>
             </div>
+          </div>
+          <div>
+            <label>&nbsp;</label>
+            <button type="button" class="btn reset-btn" id="resetMatrixBtn">RESET</button>
           </div>
         </div>
 
@@ -437,10 +450,12 @@
         <div class="matrix-scroll">
           <div id="matrixGrid" class="matrix-grid"></div>
         </div>
+        <div class="hint">fractions ok, e.g. <code>3/2</code></div>
       </div>
 
       <div class="panel">
         <div class="section-header"><span>[ OPERATIONS ]</span></div>
+        <div class="hint" style="margin-bottom:12px;">scaling: enter the factor directly (e.g. -2 or 1/2) · replacement: enter a positive value and use the sign toggle</div>
         <div id="opList"></div>
         <button class="btn dashed" id="addOpBtn" type="button">+ ADD OPERATION</button>
         <div class="error-banner" id="errorBanner"></div>
@@ -518,6 +533,34 @@ function resizeEntries(){
   state.entries = newEntries;
 }
 
+// Restricts typed text to only what a signed whole number, decimal, or
+// fraction could ever look like: digits, an optional leading "-", and at
+// most one "." or one "/" (never both — a value can't be a decimal and
+// a fraction at once). Built up one character at a time so an invalid
+// character is simply dropped rather than accepted and only rejected
+// later when the operation actually runs. Since this runs on every
+// keystroke (via the input event), by the time a second bad character
+// could arrive the first has already been cleaned out of the field.
+function sanitizeNumericInput(raw){
+  let result = "";
+  let hasSeparator = false; // true once a "." or "/" has been accepted
+
+  for(const ch of (raw || "")){
+    if(ch >= "0" && ch <= "9"){
+      result += ch;
+    } else if(ch === "-" && result === ""){
+      result += ch; // a minus only makes sense as the very first character
+    } else if((ch === "." || ch === "/") && !hasSeparator){
+      hasSeparator = true;
+      result += ch;
+    }
+    // anything else — letters, extra symbols, a second separator, a
+    // misplaced minus — is silently dropped
+  }
+
+  return result;
+}
+
 function renderMatrixGrid(){
   const grid = document.getElementById("matrixGrid");
   grid.style.gridTemplateColumns = `repeat(${state.cols}, 150px)`;
@@ -528,6 +571,7 @@ function renderMatrixGrid(){
       input.type = "text";
       input.value = state.entries[r][c];
       input.addEventListener("input", (e) => {
+        e.target.value = sanitizeNumericInput(e.target.value);
         state.entries[r][c] = e.target.value;
       });
       grid.appendChild(input);
@@ -545,21 +589,104 @@ document.querySelectorAll("[data-dim]").forEach(btn => {
     document.getElementById(dim === "rows" ? "rowsInput" : "colsInput").value = next;
     resizeEntries();
     renderMatrixGrid();
+    if(dim === "rows") renderOps(); // row dropdowns in Operations depend on the row count
   });
 });
 
+// Rows/Cols can also be typed directly, not just adjusted with +/-.
+// Only digits make sense here (a row count can't be a fraction, a
+// decimal, or negative), so anything else is stripped as it's typed.
+// The actual resize is deferred to blur/Enter rather than applied on
+// every keystroke — otherwise typing "12" would briefly resize to 1
+// row first, truncating whatever was in rows 2+ before the second
+// digit even lands.
+function wireDimensionTyping(inputId, dim){
+  const input = document.getElementById(inputId);
+
+  input.addEventListener("input", (e) => {
+    e.target.value = e.target.value.replace(/[^0-9]/g, "");
+  });
+
+  function commit(){
+    const raw = input.value;
+    if(raw === ""){
+      input.value = state[dim];
+      return;
+    }
+    let next = parseInt(raw, 10);
+    next = Math.min(24, Math.max(1, next));
+    input.value = next;
+    if(next !== state[dim]){
+      state[dim] = next;
+      resizeEntries();
+      renderMatrixGrid();
+      if(dim === "rows") renderOps(); // row dropdowns in Operations depend on the row count
+    }
+  }
+
+  input.addEventListener("blur", commit);
+  input.addEventListener("keydown", (e) => {
+    if(e.key === "Enter"){
+      e.preventDefault();
+      input.blur(); // triggers commit above, and gives a clear "done typing" affordance
+    }
+  });
+}
+wireDimensionTyping("rowsInput", "rows");
+wireDimensionTyping("colsInput", "cols");
+
+document.getElementById("resetMatrixBtn").addEventListener("click", () => {
+  state.rows = 3;
+  state.cols = 4;
+  state.entries = [
+    ["0", "0", "0", "0"],
+    ["0", "0", "0", "0"],
+    ["0", "0", "0", "0"],
+  ];
+  document.getElementById("rowsInput").value = 3;
+  document.getElementById("colsInput").value = 4;
+  renderMatrixGrid();
+  renderOps(); // row dropdowns in Operations depend on the row count
+  clearError();
+
+  document.getElementById("stepView").innerHTML = `
+    <div class="empty-state">
+      <span class="prompt">&gt;</span> No operations run yet. Set up your matrix and queue up to
+      three row operations on the left, then hit RUN — you'll see the original
+      matrix, every operation applied in order, and the final matrix here.
+    </div>
+  `;
+});
+
 // ---------- Operation queue rendering ----------
+// Builds a <select> listing every row from 1 to the matrix's current row
+// count — so the dropdown can never offer a row number that doesn't
+// actually exist in the matrix the user set up.
+function rowOptionsHtml(idx, field, selectedValue){
+  let options = "";
+  for(let r = 1; r <= state.rows; r++){
+    options += `<option value="${r}" ${r === selectedValue ? "selected" : ""}>R${r}</option>`;
+  }
+  return `<select data-op="${idx}" data-field="${field}">${options}</select>`;
+}
+
 function opFieldsHtml(op, idx){
+  // If the matrix was resized smaller after this operation was already
+  // set up, clamp its row references back into range rather than
+  // pointing at a row that no longer exists.
+  if(op.row > state.rows) op.row = state.rows;
+  if(op.row_b != null && op.row_b > state.rows) op.row_b = state.rows;
+
   const rowField = `
     <div class="field">
       <label>Row</label>
-      <input type="number" min="1" data-op="${idx}" data-field="row" value="${op.row}">
+      ${rowOptionsHtml(idx, "row", op.row)}
     </div>`;
 
   const rowBField = `
     <div class="field">
       <label>${op.op_type === "interchange" ? "With row" : "Source row"}</label>
-      <input type="number" min="1" data-op="${idx}" data-field="row_b" value="${op.row_b ?? ""}">
+      ${rowOptionsHtml(idx, "row_b", op.row_b ?? 1)}
     </div>`;
 
   const signToggle = `
@@ -614,7 +741,7 @@ function renderOps(){
     list.appendChild(card);
   });
 
-  list.querySelectorAll("select[data-op]").forEach(sel => {
+  list.querySelectorAll('select[data-field="op_type"]').forEach(sel => {
     sel.addEventListener("change", (e) => {
       const idx = parseInt(e.target.dataset.op, 10);
       const op = state.operations[idx];
@@ -635,6 +762,14 @@ function renderOps(){
     });
   });
 
+  list.querySelectorAll('select[data-field="row"], select[data-field="row_b"]').forEach(sel => {
+    sel.addEventListener("change", (e) => {
+      const idx = parseInt(e.target.dataset.op, 10);
+      const field = e.target.dataset.field;
+      state.operations[idx][field] = parseInt(e.target.value, 10);
+    });
+  });
+
   list.querySelectorAll(".toggle-btn").forEach(btn => {
     btn.addEventListener("click", () => {
       const group = btn.closest(".toggle-group");
@@ -650,9 +785,12 @@ function renderOps(){
       const idx = parseInt(e.target.dataset.op, 10);
       const field = e.target.dataset.field;
       const op = state.operations[idx];
-      op[field] = (field === "row" || field === "row_b")
-        ? (e.target.value === "" ? null : parseInt(e.target.value, 10))
-        : e.target.value;
+      // Only magnitude/factor are still plain text inputs (row/row_b are
+      // combo boxes now, handled by the listener above). Restrict typed
+      // characters to what a signed fraction, decimal, or whole number
+      // could look like, same as the matrix entry cells.
+      e.target.value = sanitizeNumericInput(e.target.value);
+      op[field] = e.target.value;
     });
   });
 
