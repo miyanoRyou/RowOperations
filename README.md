@@ -9,7 +9,7 @@ Comp3/
 │   ├── matrix_backend.py    ← core matrix engine (no web code)
 │   ├── api.py               ← FastAPI wrapper, exposes it over HTTP
 │   ├── requirements.txt
-│   └── venv/                ← optional; only if you use venv instead of conda (Section 6)
+│   └── venv/                ← created in Section 2, Step 2 (not included)
 └── frontend/
     └── index.html           ← self-contained UI (HTML + CSS + JS, no build step)
 ```
@@ -30,19 +30,17 @@ backend over HTTP, so you just need the backend running first.
   **Anaconda Prompt**, which is the terminal you'll use for everything below.
 - A modern browser (Chrome, Firefox, Edge, Safari)
 
-Open **Anaconda Prompt** from the Start menu (macOS/Linux: any terminal
-where `conda` works) and check that it's set up:
+Open **Anaconda Prompt** from the Start menu (macOS/Linux: any terminal where
+Anaconda's Python is on your PATH) and check your Python version:
 
 ```
-conda --version
 python --version
 ```
 
-Both should print a version number (Python 3.9 or newer is required).
+It should print Python 3.9 or newer.
 
-> **Not using Anaconda?** A plain python.org install with `venv` also works —
-> see [Section 6](#6-anaconda--windows-notes) for that route. The rest of this
-> tutorial assumes Anaconda.
+> **Not using Anaconda?** A plain python.org install works too — see
+> [Section 6](#6-anaconda--windows-notes).
 
 ---
 
@@ -51,10 +49,11 @@ Both should print a version number (Python 3.9 or newer is required).
 **Step 1 — Open Anaconda Prompt in the `backend/` folder:**
 
 ```
-cd Comp3/backend
+cd backend
 ```
 
-If you left the folder in your Downloads directory, that means:
+(Run this from inside the `Comp3` folder. Or jump straight there from
+anywhere — if you left the folder in Downloads:)
 
 ```
 # Windows (Anaconda Prompt)
@@ -64,16 +63,24 @@ cd %USERPROFILE%\Downloads\Comp3\backend
 cd ~/Downloads/Comp3/backend
 ```
 
-**Step 2 — Create and activate a conda environment (one-time setup):**
+**Step 2 — Create a virtual environment (recommended):**
 
 ```
-conda create -n rowop python=3.11
-conda activate rowop
+python -m venv venv
 ```
 
-Type `y` when conda asks to proceed. Your prompt should now start with
-`(rowop)` instead of `(base)`. This keeps the project's packages separate
-from everything else you have installed in Anaconda.
+Activate it:
+
+```
+# macOS/Linux
+source venv/bin/activate
+
+# Windows (Anaconda Prompt, Command Prompt or PowerShell)
+venv\Scripts\activate
+```
+
+Your prompt should now show `(venv)` at the start of the line. (In Anaconda
+Prompt you'll see `(venv) (base)` — that's fine, it just means both are active.)
 
 **Step 3 — Install dependencies:**
 
@@ -83,7 +90,7 @@ pip install -r requirements.txt
 
 Let this fully finish — it should pull in `fastapi`, `uvicorn`, `pydantic`,
 and their sub-dependencies. If `uvicorn` isn't found in the next step, this
-is almost always why: come back and re-run this install (make sure `(rowop)`
+is almost always why: come back and re-run this install (make sure `(venv)`
 is showing in your prompt first).
 
 **Step 4 — Start the server:**
@@ -131,7 +138,6 @@ Open a **second Anaconda Prompt** (the first one is busy running the backend),
 then:
 
 ```
-conda activate rowop
 cd Comp3/frontend
 python -m http.server 5500
 ```
@@ -184,45 +190,34 @@ const API_BASE = "https://your-api.example.com";
 
 ### Coming back later
 
-Every time you open a new Anaconda Prompt, reactivate the environment before
+Every time you open a new Anaconda Prompt, reactivate the venv before
 starting the server:
 
 ```
-conda activate rowop
-cd Comp3/backend
+cd backend
+venv\Scripts\activate          # source venv/bin/activate on macOS/Linux
 uvicorn api:app --reload --port 8000
 ```
 
-You only need to run `conda create` and `pip install` once.
+You only need to run `python -m venv venv` and `pip install` once.
 
 ### Always use Anaconda Prompt
 
 - Use **Anaconda Prompt** (Start menu), not a plain Command Prompt or
-  PowerShell — those don't know about `conda` unless you've set that up
-  separately.
+  PowerShell — Anaconda's Python is already on the PATH there.
 - Anaconda registers the command as `python` — **not** `python3`. If a
   command with `python3` fails or opens the Microsoft Store, just use
   `python` instead.
 - Anaconda sidesteps the Windows "Python was not found" Store-alias problem
   entirely, since it puts its own Python on the PATH inside the prompt.
+- `venv` works the same way inside Anaconda's base environment — no extra
+  conda setup is needed.
 
-### Alternative: no Anaconda (python.org + venv)
+### Alternative: python.org instead of Anaconda
 
-If you'd rather not use Anaconda, install Python 3.9+ from python.org (tick
-**"Add python.exe to PATH"** on the very first installer screen), then replace
-Step 2 with:
-
-```
-python -m venv venv
-
-# macOS/Linux
-source venv/bin/activate
-
-# Windows (Command Prompt or PowerShell)
-venv\Scripts\activate
-```
-
-Your prompt should now show `(venv)`. Steps 3–5 are identical.
+Install Python 3.9+ from python.org and tick **"Add python.exe to PATH"** on
+the very first installer screen — this is the step almost everyone misses.
+Everything in Section 2 then works exactly as written, in a regular terminal.
 
 If `python --version` says Python "was not found" and opens the Microsoft
 Store, that's Windows' stub `python.exe` hijacking the command. Fix it under
@@ -236,10 +231,9 @@ terminal.
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| `'conda' is not recognized...` | You're in a regular Command Prompt/PowerShell instead of Anaconda Prompt | Open **Anaconda Prompt** from the Start menu |
 | `python` not found / opens Microsoft Store | Windows App Execution Alias intercepting the command | Use Anaconda Prompt, or see [Section 6](#6-anaconda--windows-notes) |
-| Prompt doesn't show `(rowop)` | Environment isn't activated in this window | Run `conda activate rowop` |
-| `'uvicorn' is not recognized...` | `pip install -r requirements.txt` didn't run (or didn't finish) inside the active `rowop` environment | Run `conda activate rowop`, re-run the install, watch for errors, and confirm `where pip` (Windows) or `which pip` (macOS/Linux) points inside `rowop` |
+| Prompt doesn't show `(venv)` | The venv isn't activated in this window | Run `venv\Scripts\activate` (Windows) or `source venv/bin/activate` (macOS/Linux) from `backend/` |
+| `'uvicorn' is not recognized...` | `pip install -r requirements.txt` didn't run (or didn't finish) inside the active venv | Re-run it, watch for errors, confirm `where pip` (Windows) or `which pip` (macOS/Linux) points inside `venv` |
 | Visiting `127.0.0.1:8000` shows `{"detail":"Not Found"}` | Normal — there's no route at `/` | Use `/health` or `/docs` instead |
 | Status shows `[ BACKEND UNREACHABLE ]` | Backend not running, or wrong port | Confirm `uvicorn` is running and `API_BASE` in `index.html` matches its port |
 | Browser console shows a CORS error | Backend's CORS policy is too strict | `api.py` currently allows all origins (`allow_origins=["*"]`) for local dev — check it wasn't tightened |
