@@ -3,14 +3,20 @@
 This project has two independent pieces:
 
 ```
-comp3/
+Comp3/
+├── TUTORIAL.md              ← this file
 ├── backend/
-│   ├── matrix_backend.py   ← core matrix engine (no web code)
-│   ├── api.py              ← FastAPI wrapper, exposes it over HTTP
-│   └── requirements.txt
+│   ├── matrix_backend.py    ← core matrix engine (no web code)
+│   ├── api.py               ← FastAPI wrapper, exposes it over HTTP
+│   ├── requirements.txt
+│   └── venv/                ← optional; only if you use venv instead of conda (Section 6)
 └── frontend/
     └── index.html           ← self-contained UI (HTML + CSS + JS, no build step)
 ```
+
+> A `__pycache__/` folder will also appear inside `backend/` the first time
+> you run the server. That's normal — Python generates it automatically and
+> you can ignore it.
 
 The frontend is a single static HTML file — no npm, no bundler. It talks to the
 backend over HTTP, so you just need the backend running first.
@@ -19,50 +25,55 @@ backend over HTTP, so you just need the backend running first.
 
 ## 1. Prerequisites
 
-- Python 3.9+ — either a plain install from python.org, **or** Anaconda (both
-  work fine; see the Windows notes below if you hit trouble)
+- **Anaconda** (recommended) — download the Anaconda Distribution (or the
+  lighter Miniconda) from anaconda.com. It bundles Python and gives you the
+  **Anaconda Prompt**, which is the terminal you'll use for everything below.
 - A modern browser (Chrome, Firefox, Edge, Safari)
 
-Check your Python version:
+Open **Anaconda Prompt** from the Start menu (macOS/Linux: any terminal
+where `conda` works) and check that it's set up:
 
 ```
+conda --version
 python --version
 ```
 
-> **Windows users:** see [Section 6](#6-windows-notes) first if this command
-> tells you Python "was not found" and offers to open the Microsoft Store —
-> that's a common gotcha, not a real error, and it's a two-minute fix.
+Both should print a version number (Python 3.9 or newer is required).
+
+> **Not using Anaconda?** A plain python.org install with `venv` also works —
+> see [Section 6](#6-anaconda--windows-notes) for that route. The rest of this
+> tutorial assumes Anaconda.
 
 ---
 
 ## 2. Set up the backend
 
-**Step 1 — Open a terminal in the `backend/` folder:**
+**Step 1 — Open Anaconda Prompt in the `backend/` folder:**
 
 ```
-cd comp3/backend
+cd Comp3/backend
 ```
 
-**Step 2 — Create a virtual environment (recommended):**
+If you left the folder in your Downloads directory, that means:
 
 ```
-python -m venv venv
-```
+# Windows (Anaconda Prompt)
+cd %USERPROFILE%\Downloads\Comp3\backend
 
-Activate it:
-
-```
 # macOS/Linux
-source venv/bin/activate
-
-# Windows (Command Prompt or PowerShell)
-venv\Scripts\activate
-
-# Windows (Anaconda Prompt) — venv still works the same way inside conda's base env
-venv\Scripts\activate
+cd ~/Downloads/Comp3/backend
 ```
 
-Your prompt should now show `(venv)` at the start of the line.
+**Step 2 — Create and activate a conda environment (one-time setup):**
+
+```
+conda create -n rowop python=3.11
+conda activate rowop
+```
+
+Type `y` when conda asks to proceed. Your prompt should now start with
+`(rowop)` instead of `(base)`. This keeps the project's packages separate
+from everything else you have installed in Anaconda.
 
 **Step 3 — Install dependencies:**
 
@@ -72,7 +83,8 @@ pip install -r requirements.txt
 
 Let this fully finish — it should pull in `fastapi`, `uvicorn`, `pydantic`,
 and their sub-dependencies. If `uvicorn` isn't found in the next step, this
-is almost always why: come back and re-run this install.
+is almost always why: come back and re-run this install (make sure `(rowop)`
+is showing in your prompt first).
 
 **Step 4 — Start the server:**
 
@@ -115,8 +127,12 @@ Double-click `frontend/index.html`, or open it via `File → Open` in your brows
 
 **Option B — Serve it (recommended, avoids some browsers' file:// quirks):**
 
+Open a **second Anaconda Prompt** (the first one is busy running the backend),
+then:
+
 ```
-cd row-reducer/frontend
+conda activate rowop
+cd Comp3/frontend
 python -m http.server 5500
 ```
 
@@ -164,37 +180,55 @@ const API_BASE = "https://your-api.example.com";
 
 ---
 
-## 6. Windows notes
+## 6. Anaconda & Windows notes
 
-### "Python was not found" / redirects to the Microsoft Store
+### Coming back later
 
-Windows ships a stub `python.exe` that hijacks the command and offers to
-install from the Store instead of running your real Python. Fix:
+Every time you open a new Anaconda Prompt, reactivate the environment before
+starting the server:
 
-1. Open **Settings → Apps → Advanced app settings → App execution aliases**.
-2. Turn **off** the two entries for `python.exe` and `python3.exe`.
-3. Close and reopen your terminal, then re-check `python --version`.
+```
+conda activate rowop
+cd Comp3/backend
+uvicorn api:app --reload --port 8000
+```
 
-If you install a fresh Python from python.org instead, make sure to check
-**"Add python.exe to PATH"** on the very first installer screen — this is the
-step almost everyone misses.
+You only need to run `conda create` and `pip install` once.
 
-### Using Anaconda instead
+### Always use Anaconda Prompt
 
-Anaconda works fine and sidesteps the Store-alias issue entirely, since it
-adds its own **Anaconda Prompt** with Python already on its PATH.
+- Use **Anaconda Prompt** (Start menu), not a plain Command Prompt or
+  PowerShell — those don't know about `conda` unless you've set that up
+  separately.
+- Anaconda registers the command as `python` — **not** `python3`. If a
+  command with `python3` fails or opens the Microsoft Store, just use
+  `python` instead.
+- Anaconda sidesteps the Windows "Python was not found" Store-alias problem
+  entirely, since it puts its own Python on the PATH inside the prompt.
 
-- Use **Anaconda Prompt** (Start menu), not a plain Command Prompt.
-- Anaconda only registers the command as `python` — **not** `python3`. If a
-  command with `python3` fails with the same Store-redirect message, that's
-  why; just use `python` instead.
-- Optional: keep this project isolated from your other conda environments:
-  ```
-  conda create -n rowop python=3.11
-  conda activate rowop
-  ```
-- From there, everything in Section 2 works exactly as written (`python -m venv venv`,
-  `pip install -r requirements.txt`, `uvicorn api:app --reload --port 8000`).
+### Alternative: no Anaconda (python.org + venv)
+
+If you'd rather not use Anaconda, install Python 3.9+ from python.org (tick
+**"Add python.exe to PATH"** on the very first installer screen), then replace
+Step 2 with:
+
+```
+python -m venv venv
+
+# macOS/Linux
+source venv/bin/activate
+
+# Windows (Command Prompt or PowerShell)
+venv\Scripts\activate
+```
+
+Your prompt should now show `(venv)`. Steps 3–5 are identical.
+
+If `python --version` says Python "was not found" and opens the Microsoft
+Store, that's Windows' stub `python.exe` hijacking the command. Fix it under
+**Settings → Apps → Advanced app settings → App execution aliases** by turning
+**off** the entries for `python.exe` and `python3.exe`, then reopen your
+terminal.
 
 ---
 
@@ -202,8 +236,10 @@ adds its own **Anaconda Prompt** with Python already on its PATH.
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| `python` not found / opens Microsoft Store | Windows App Execution Alias intercepting the command | See [Section 6](#6-windows-notes) |
-| `'uvicorn' is not recognized...` | `pip install -r requirements.txt` didn't run (or didn't finish) inside the active venv | Re-run it, watch for errors, confirm `where pip` (Windows) or `which pip` (macOS/Linux) points inside `venv` |
+| `'conda' is not recognized...` | You're in a regular Command Prompt/PowerShell instead of Anaconda Prompt | Open **Anaconda Prompt** from the Start menu |
+| `python` not found / opens Microsoft Store | Windows App Execution Alias intercepting the command | Use Anaconda Prompt, or see [Section 6](#6-anaconda--windows-notes) |
+| Prompt doesn't show `(rowop)` | Environment isn't activated in this window | Run `conda activate rowop` |
+| `'uvicorn' is not recognized...` | `pip install -r requirements.txt` didn't run (or didn't finish) inside the active `rowop` environment | Run `conda activate rowop`, re-run the install, watch for errors, and confirm `where pip` (Windows) or `which pip` (macOS/Linux) points inside `rowop` |
 | Visiting `127.0.0.1:8000` shows `{"detail":"Not Found"}` | Normal — there's no route at `/` | Use `/health` or `/docs` instead |
 | Status shows `[ BACKEND UNREACHABLE ]` | Backend not running, or wrong port | Confirm `uvicorn` is running and `API_BASE` in `index.html` matches its port |
 | Browser console shows a CORS error | Backend's CORS policy is too strict | `api.py` currently allows all origins (`allow_origins=["*"]`) for local dev — check it wasn't tightened |
