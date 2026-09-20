@@ -139,7 +139,7 @@
   }
 
   /* dimension steppers */
-  .dim-row{ display:flex; gap: 24px; margin-bottom: 24px; }
+  .dim-row{ display:flex; gap: 24px; margin-bottom: 24px; flex-wrap: wrap; }
   .stepper{
     display:flex;
     border: 1px solid var(--line);
@@ -253,13 +253,18 @@
   .btn:disabled{ opacity: 0.3; cursor: not-allowed; }
   .btn.dashed{ border-style: dashed; margin-bottom: 22px; }
 
-  .reset-btn{
-    width: 140px;
-    height: 52px;
-    padding: 0;
-    font-size: 13px;
+  .action-row{
+    display:flex;
+    gap: 12px;
+    margin-bottom: 24px;
   }
-  .reset-btn:hover{ border-color: var(--red); color: var(--red); }
+  .action-btn{
+    flex: 1;
+    padding: 12px 8px;
+    font-size: 12px;
+    letter-spacing: 0.04em;
+  }
+  .action-btn:hover{ border-color: var(--red); color: var(--red); }
 
   .run-btn{
     width:100%;
@@ -440,14 +445,12 @@
               <button type="button" data-dim="cols" data-dir="1">+</button>
             </div>
           </div>
-          <div>
-            <label>&nbsp;</label>
-            <button type="button" class="btn reset-btn" id="randomizeMatrixBtn">RANDOM</button>
-          </div>
-          <div>
-            <label>&nbsp;</label>
-            <button type="button" class="btn reset-btn" id="resetMatrixBtn">RESET</button>
-          </div>
+        </div>
+
+        <div class="action-row">
+          <button type="button" class="btn action-btn" id="randomizeSizeBtn">RANDOMIZE SIZE</button>
+          <button type="button" class="btn action-btn" id="randomizeMatrixBtn">RANDOMIZE INPUT</button>
+          <button type="button" class="btn action-btn" id="resetMatrixBtn">RESET</button>
         </div>
 
         <label>Entries</label>
@@ -675,6 +678,16 @@ document.getElementById("randomizeMatrixBtn").addEventListener("click", () => {
     }
   }
   renderMatrixGrid();
+});
+
+document.getElementById("randomizeSizeBtn").addEventListener("click", () => {
+  state.rows = randomInt(1, 24);
+  state.cols = randomInt(1, 24);
+  document.getElementById("rowsInput").value = state.rows;
+  document.getElementById("colsInput").value = state.cols;
+  resizeEntries();
+  renderMatrixGrid();
+  renderOps(); // row dropdowns in Operations depend on the row count
 });
 
 // ---------- Operation queue rendering ----------
