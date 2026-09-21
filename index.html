@@ -504,9 +504,9 @@ const state = {
     ["-2","1","2","-3"],
   ],
   operations: [
-    { op_type: "replacement", row: 2, row_b: 1, sign: "+", magnitude: "3/2" },
-    { op_type: "replacement", row: 3, row_b: 1, sign: "+", magnitude: "1" },
-    { op_type: "scaling", row: 2, row_b: null, factor: "2" },
+    { op_type: "", row: 2, row_b: 1, sign: "+", magnitude: "3/2" },
+    { op_type: "", row: 3, row_b: 1, sign: "+", magnitude: "1" },
+    { op_type: "", row: 2, row_b: null, factor: "2" },
   ],
 };
 
@@ -744,7 +744,8 @@ function opFieldsHtml(op, idx){
 
   if(op.op_type === "scaling") return rowField + factorField;
   if(op.op_type === "interchange") return rowField + rowBField;
-  return rowField + rowBField + signToggle + magnitudeField; // replacement
+  if(op.op_type === "replacement") return rowField + rowBField + signToggle + magnitudeField;
+  return `<div class="hint" style="margin-top:4px;">Select a type above to configure this operation.</div>`;
 }
 
 function renderOps(){
@@ -762,6 +763,7 @@ function renderOps(){
         <div class="field">
           <label>Type</label>
           <select data-op="${idx}" data-field="op_type">
+            <option value="" disabled ${op.op_type === "" ? "selected" : ""}>Choose an operation</option>
             <option value="scaling" ${op.op_type==="scaling"?"selected":""}>Scaling</option>
             <option value="interchange" ${op.op_type==="interchange"?"selected":""}>Interchange</option>
             <option value="replacement" ${op.op_type==="replacement"?"selected":""}>Replacement</option>
@@ -843,11 +845,14 @@ function updateAddOpState(){
 
 document.getElementById("addOpBtn").addEventListener("click", () => {
   if(state.operations.length >= MAX_OPS) return;
-  state.operations.push({ op_type: "scaling", row: 1, row_b: null, factor: "1" });
+  state.operations.push({ op_type: "", row: 1, row_b: null, factor: "1" });
   renderOps();
 });
 
 // Builds one random-but-always-valid operation for the current matrix size.
+// The type pool below is deliberately just the 3 real operation types —
+// the "Choose an operation" placeholder is never a candidate here, so
+// randomizing always produces a fully runnable operation.
 // Interchange/Replacement need two distinct rows, so they're only offered
 // when the matrix actually has 2+ rows — with a 1-row matrix, every
 // randomized operation falls back to Scaling.
@@ -910,6 +915,12 @@ function computeFactor(op){
 
 async function runOperations(){
   clearError();
+
+  const unconfigured = state.operations.findIndex(op => op.op_type === "");
+  if(unconfigured !== -1){
+    showError(`OP_${unconfigured + 1} has no operation type selected. Choose Scaling, Interchange, or Replacement before running.`);
+    return;
+  }
 
   const payload = {
     rows: state.rows,
